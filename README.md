@@ -1,4 +1,4 @@
-# Laravel Clean Architecture Project Structure
+# Laravel Clean Architecture Project Structure: A Pragmatic Approach
 
 This document outlines a comprehensive project structure for Laravel applications following Clean Architecture principles with a domain-driven design approach.
 
