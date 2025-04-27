@@ -1,8 +1,18 @@
 # Laravel Clean Architecture Project Structure: A Pragmatic Approach
 
-This document outlines a comprehensive project structure for Laravel applications following Clean Architecture principles with a domain-driven design approach.
+This document outlines a comprehensive project structure for Laravel applications following Clean Architecture principles with a domain-driven design approach, presented in order from simplest to most complex concepts.
 
-## Key Principles
+## Introduction
+
+This guide presents a spectrum of implementations from pragmatic to purist approaches. You can choose the level of architectural purity that makes sense for your project:
+
+- **Pragmatic Approach**: Directly use Eloquent in use cases for simpler applications or teams new to Clean Architecture
+- **Standard Approach**: Use repositories for more decoupling and testability
+- **Purist Approach**: Full separation with presenters, DTOs, and strict layer isolation
+
+Start with the approach that fits your current needs, then evolve as your application grows or your team gains experience with the architecture.
+
+## Basic Principles
 
 1. **Domain-Focused Organization**: Top-level directories represent business domains rather than technical concerns
 2. **Clean Architecture Layers**: Each domain follows the standard Clean Architecture layers
@@ -10,7 +20,202 @@ This document outlines a comprehensive project structure for Laravel application
 4. **Testing Support**: Each domain includes testing support utilities
 5. **Explicit IO Layer**: Clear separation of external integrations and frameworks
 
-## Directory Structure
+## Core Structure Overview
+
+```
+project-root/
+├── app/
+│   ├── Foundation/               # Shared kernel, base classes, traits
+│   ├── Booking/                  # Booking domain module
+│   ├── Payment/                  # Payment domain module
+│   └── User/                     # User domain module
+```
+
+## Clean Architecture Layers
+
+Each domain is organized into layers following Clean Architecture principles:
+
+```
+Booking/
+├── Entities/             # Domain entities, models, business rules
+├── UseCases/             # Application business logic
+├── Adapters/             # Framework-agnostic interface adapters  
+├── IO/                   # Frameworks, drivers, external services
+├── Specs/                # Behavior specifications
+└── Testing/              # Testing utilities
+```
+
+### Entities Layer
+
+Contains your domain models and business rules:
+
+```php
+// app/Booking/Entities/Booking.php
+namespace App\Booking\Entities;
+
+use Illuminate\Database\Eloquent\Model;
+use App\User\Entities\User;
+
+class Booking extends Model
+{
+    protected $fillable = ['user_id', 'start_date', 'end_date', 'status', 'notes'];
+    
+    // Domain methods (business logic)
+    public function cancel()
+    {
+        $this->status = 'cancelled';
+        $this->cancelled_at = now();
+        return $this;
+    }
+    
+    public function canBeCancelled()
+    {
+        return $this->status === 'active' && $this->start_date > now();
+    }
+    
+    // Relationships
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+}
+```
+
+For pragmatic reasons, we place Eloquent models directly in the Entities layer, which is a compromise that works well in the Laravel ecosystem.
+
+### Simple Use Case Implementation
+
+The simplest use cases can interact directly with Eloquent models for a pragmatic approach:
+
+```php
+// app/Booking/UseCases/CancelBooking.php
+namespace App\Booking\UseCases;
+
+use App\Booking\Entities\Booking;
+use App\Booking\UseCases\Exceptions\BookingNotFoundException;
+use App\Booking\UseCases\Exceptions\BookingCancellationException;
+
+class CancelBooking
+{
+    public function execute(string $bookingId)
+    {
+        // Directly use Eloquent for simplicity
+        $booking = Booking::find($bookingId);
+        
+        if (!$booking) {
+            throw new BookingNotFoundException("Booking not found: {$bookingId}");
+        }
+        
+        if (!$booking->canBeCancelled()) {
+            throw new BookingCancellationException('Booking cannot be cancelled');
+        }
+        
+        $booking->cancel();
+        $booking->save();
+        
+        return $booking;
+    }
+}
+```
+
+This can be used directly in a controller:
+
+```php
+// app/Booking/IO/Http/BookingController.php
+namespace App\Booking\IO\Http;
+
+use App\Booking\UseCases\CancelBooking;
+use App\Booking\UseCases\Exceptions\BookingNotFoundException;
+use App\Booking\UseCases\Exceptions\BookingCancellationException;
+use Illuminate\Http\JsonResponse;
+
+class BookingController
+{
+    private $cancelBooking;
+    
+    public function __construct(CancelBooking $cancelBooking)
+    {
+        $this->cancelBooking = $cancelBooking;
+    }
+    
+    public function cancel(string $id): JsonResponse
+    {
+        try {
+            $booking = $this->cancelBooking->execute($id);
+            return response()->json([
+                'success' => true,
+                'data' => $booking
+            ]);
+        } catch (BookingNotFoundException $e) {
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage()
+            ], 404);
+        } catch (BookingCancellationException $e) {
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage()
+            ], 400);
+        }
+    }
+}
+```
+
+This pragmatic approach allows you to get many of the benefits of Clean Architecture while leveraging Laravel's Eloquent ORM directly. As your application grows, you can gradually migrate to more decoupled implementations using repositories.
+
+### More Complex Use Cases with Repository Pattern
+
+As your application grows, you might want to add more decoupling by using the repository pattern:
+
+```php
+// app/Booking/UseCases/Repositories/BookingRepositoryInterface.php
+namespace App\Booking\UseCases\Repositories;
+
+use App\Booking\Entities\Booking;
+use DateTime;
+
+interface BookingRepositoryInterface
+{
+    public function findById(string $id): ?Booking;
+    public function findActiveByDateRange(string $userId, DateTime $startDate, DateTime $endDate): array;
+    public function save(Booking $booking): Booking;
+    public function delete(string $id): bool;
+}
+
+// app/Booking/UseCases/CancelBooking.php
+namespace App\Booking\UseCases;
+
+use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
+use App\Booking\Entities\Booking;
+
+class CancelBooking
+{
+    private $bookingRepository;
+    
+    public function __construct(BookingRepositoryInterface $bookingRepository)
+    {
+        $this->bookingRepository = $bookingRepository;
+    }
+    
+    public function execute(string $bookingId)
+    {
+        $booking = $this->bookingRepository->findById($bookingId);
+        
+        if (!$booking) {
+            throw new BookingNotFoundException("Booking not found: {$bookingId}");
+        }
+        
+        if (!$booking->canBeCancelled()) {
+            throw new BookingCancellationException('Booking cannot be cancelled');
+        }
+        
+        $booking->cancel();
+        return $this->bookingRepository->save($booking);
+    }
+}
+```
+
+## Complete Directory Structure
 
 ```
 project-root/
@@ -18,10 +223,11 @@ project-root/
 │   ├── Foundation/               # Shared kernel, base classes, traits
 │   │   ├── Entities/             # Base entities, models, value objects, shared domain logic
 │   │   ├── UseCases/             # Base interactors, shared application services
+│   │       ├── Repositories/     # Repository interfaces for shared entities
 │   │   ├── Adapters/             # Base presenters, view models, framework-agnostic components
 │   │   ├── IO/                   # Shared IO components
-│   │       ├── Database/         # Common database concerns, base repositories
-│   │       ├── Http/             # Shared controllers, middleware, base API resources
+│   │       ├── Database/         # Common database concerns, repository implementations
+│   │       ├── Http/             # Shared controllers, middleware, API resources
 │   │       ├── Web/              # Common layouts, shared components, base templates
 │   │       ├── GraphQL/          # Shared GraphQL components
 │   │       └── ExternalServices/ # Shared service clients, integrations
@@ -35,8 +241,8 @@ project-root/
 │   │       ├── Repositories/     # Repository interfaces
 │   │   ├── Adapters/             # Framework-agnostic interface adapters
 │   │   ├── IO/                   # Frameworks, drivers, external services
-│   │       ├── Database/         # Booking-specific database migrations and seeders
-│   │       ├── Http/             # Booking-specific HTTP interfaces, controllers
+│   │       ├── Database/         # Booking-specific database migrations, seeders, repositories
+│   │       ├── Http/             # Booking-specific HTTP interfaces, controllers, resources
 │   │       ├── Web/              # Booking-specific UI elements
 │   │       ├── GraphQL/          # Booking-specific GraphQL components
 │   │       └── ExternalServices/ # Booking-specific external services
@@ -44,62 +250,15 @@ project-root/
 │   │   ├── Specs/                # Booking behavior specifications
 │   │   └── Testing/              # Booking-specific testing utilities
 │   │
-│   ├── Payment/                  # Payment domain module
-│   │   ├── Entities/             # Payment-specific domain entities and models
-│   │   ├── UseCases/             # Payment-specific application logic
-│   │       ├── Repositories/     # Repository interfaces
-│   │   ├── Adapters/             # Framework-agnostic interface adapters
-│   │   ├── IO/                   # Payment-specific frameworks and drivers
-│   │       ├── Database/         # Payment-specific database migrations and seeders
-│   │       ├── Http/             # Payment-specific HTTP interfaces, controllers
-│   │       ├── Web/              # Payment-specific UI elements
-│   │       ├── GraphQL/          # Payment-specific GraphQL components
-│   │       └── ExternalServices/ # Payment gateways, providers
-│   │       ├── PaymentServiceProvider.php      # Payment domain service provider
-│   │   ├── Specs/                # Payment behavior specifications
-│   │   └── Testing/              # Payment-specific testing utilities
-│   │
-│   └── User/                     # User domain module
-│       ├── Entities/             # User-specific domain entities and models
-│       ├── UseCases/             # User-specific application logic
-│       │   ├── Repositories/     # Repository interfaces
-│       ├── Adapters/             # Framework-agnostic interface adapters
-│       ├── IO/                   # User-specific frameworks and drivers
-│           ├── Database/         # User-specific database migrations and seeders
-│           ├── Http/             # User-specific HTTP interfaces, controllers
-│           ├── Web/              # User-specific UI elements
-│           ├── GraphQL/          # User-specific GraphQL components
-│           └── ExternalServices/ # Authentication services, etc.
-│           ├── UserServiceProvider.php         # User domain service provider
-│       ├── Specs/                # User behavior specifications
-│       └── Testing/              # User-specific testing utilities
+│   ├── Payment/                  # Payment domain module (same structure)
+│   └── User/                     # User domain module (same structure)
 ```
 
-## Layer Descriptions
+## More Advanced Use Case Patterns
 
-### Entities Layer
+### Request/Response Models with spatie/laravel-data
 
-Contains the enterprise-wide business rules and entities:
-- Domain entities (Eloquent models)
-- Value objects
-- Domain events
-- Business rule validators
-
-While this is a pragmatic departure from pure clean architecture, placing Eloquent models in the Entities layer allows for a more practical implementation while maintaining domain organization. Models should encapsulate both data structure and domain behavior.
-
-### UseCases Layer
-
-Contains application-specific business rules:
-- Interactors/services
-- Command handlers
-- Repository interfaces
-- DTOs (Data Transfer Objects)
-
-This layer can depend on the Entities layer but not on outer layers.
-
-#### Request/Response Models with spatie/laravel-data
-
-For input and output models in the UseCases layer, the `spatie/laravel-data` package provides an excellent solution for creating strongly-typed DTOs:
+For more complex use cases, the `spatie/laravel-data` package provides strongly-typed DTOs:
 
 ```php
 // app/Booking/UseCases/CreateBooking/CreateBookingRequest.php
@@ -116,9 +275,7 @@ class CreateBookingRequest extends Data
 }
 ```
 
-You have two options for handling responses from use cases:
-
-**Option 1: Return entities directly (simpler approach)**
+Use this with your use cases:
 
 ```php
 // app/Booking/UseCases/CreateBooking.php
@@ -126,301 +283,7 @@ namespace App\Booking\UseCases;
 
 use App\Booking\Entities\Booking;
 use App\Booking\UseCases\CreateBooking\CreateBookingRequest;
-
-class CreateBooking
-{
-    public function execute(CreateBookingRequest $request): Booking
-    {
-        $booking = new Booking();
-        $booking->user_id = $request->userId;
-        $booking->start_date = $request->startDate;
-        $booking->end_date = $request->endDate;
-        $booking->notes = $request->notes;
-        $booking->status = 'pending';
-        $booking->save();
-        
-        return $booking;
-    }
-}
-```
-
-**Option 2: Use response DTOs (when transformation is needed)**
-
-```php
-// app/Booking/UseCases/CreateBooking/CreateBookingResponse.php
-namespace App\Booking\UseCases\CreateBooking;
-
-use Spatie\LaravelData\Data;
-
-class CreateBookingResponse extends Data
-{
-    public string $id;
-    public string $userId;
-    public string $startDate;
-    public string $endDate;
-    public string $status;
-    public ?string $notes;
-}
-
-// app/Booking/UseCases/CreateBooking.php
-namespace App\Booking\UseCases;
-
-use App\Booking\Entities\Booking;
-use App\Booking\UseCases\CreateBooking\CreateBookingRequest;
-use App\Booking\UseCases\CreateBooking\CreateBookingResponse;
-
-class CreateBooking
-{
-    public function execute(CreateBookingRequest $request): CreateBookingResponse
-    {
-        $booking = new Booking();
-        $booking->user_id = $request->userId;
-        $booking->start_date = $request->startDate;
-        $booking->end_date = $request->endDate;
-        $booking->notes = $request->notes;
-        $booking->status = 'pending';
-        $booking->save();
-        
-        return CreateBookingResponse::from($booking);
-    }
-}
-```
-
-Use response DTOs when:
-- You need to transform data before returning (renaming fields, changing formats)
-- You want to hide certain properties or add computed values
-- You need to combine data from multiple entities
-- You want explicit control over the response structure
-
-Return entities directly when:
-- The entity already contains all needed data in the right format
-- You want to keep the code simpler
-- The entity structure matches the expected response structure
-
-### Adapters Layer
-
-Contains interface adapters that convert data between the use cases and external formats:
-- Presenters
-- View Models
-- Data transformers 
-- Gateway interfaces (when needed beyond what's in the Use Cases layer)
-
-This layer can depend on UseCases but not on the IO layer.
-
-#### Example: Framework-Independent Presenters
-
-The Adapters layer should contain components that are framework-agnostic and serve as a bridge between use cases and external interfaces.
-
-**1. Presenter Interface in Use Cases Layer:**
-
-```php
-// app/Booking/UseCases/ViewBooking/BookingPresenterInterface.php
-namespace App\Booking\UseCases\ViewBooking;
-
-use App\Booking\Entities\Booking;
-
-interface BookingPresenterInterface
-{
-    public function presentSuccess(Booking $booking): mixed;
-    public function presentFailure(string $message): mixed;
-}
-```
-
-**2. Use Case with Presenter:**
-
-```php
-// app/Booking/UseCases/ViewBooking.php
-namespace App\Booking\UseCases;
-
-use App\Booking\Entities\Booking;
 use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
-use App\Booking\UseCases\ViewBooking\BookingPresenterInterface;
-
-class ViewBooking
-{
-    private $bookingRepository;
-    
-    public function __construct(BookingRepositoryInterface $bookingRepository)
-    {
-        $this->bookingRepository = $bookingRepository;
-    }
-    
-    public function execute(string $bookingId, BookingPresenterInterface $presenter)
-    {
-        $booking = $this->bookingRepository->findById($bookingId);
-        
-        if (!$booking) {
-            return $presenter->presentFailure("Booking not found: {$bookingId}");
-        }
-        
-        return $presenter->presentSuccess($booking);
-    }
-}
-```
-
-**3. Presenter Implementation in Adapters Layer:**
-
-```php
-// app/Booking/Adapters/Presenters/BookingJsonPresenter.php
-namespace App\Booking\Adapters\Presenters;
-
-use App\Booking\Entities\Booking;
-use App\Booking\UseCases\ViewBooking\BookingPresenterInterface;
-
-class BookingJsonPresenter implements BookingPresenterInterface
-{
-    public function presentSuccess(Booking $booking): array
-    {
-        return [
-            'success' => true,
-            'data' => [
-                'id' => $booking->id,
-                'user' => [
-                    'id' => $booking->user_id,
-                    'name' => $booking->user->name ?? 'Unknown',
-                ],
-                'period' => [
-                    'start' => $booking->start_date->format('Y-m-d'),
-                    'end' => $booking->end_date->format('Y-m-d'),
-                ],
-                'status' => $booking->status,
-                'is_cancellable' => $booking->canBeCancelled(),
-                'created_at' => $booking->created_at->format('Y-m-d H:i:s'),
-            ]
-        ];
-    }
-    
-    public function presentFailure(string $message): array
-    {
-        return [
-            'success' => false,
-            'error' => [
-                'message' => $message
-            ]
-        ];
-    }
-}
-```
-
-**4. Controller in IO Layer Using the Presenter:**
-
-```php
-// app/Booking/IO/Http/BookingController.php
-namespace App\Booking\IO\Http;
-
-use App\Booking\Adapters\Presenters\BookingJsonPresenter;
-use App\Booking\UseCases\ViewBooking;
-use Illuminate\Http\JsonResponse;
-
-class BookingController
-{
-    private $viewBooking;
-    
-    public function __construct(ViewBooking $viewBooking)
-    {
-        $this->viewBooking = $viewBooking;
-    }
-    
-    public function show(string $id): JsonResponse
-    {
-        $presenter = new BookingJsonPresenter();
-        $result = $this->viewBooking->execute($id, $presenter);
-        
-        $statusCode = $result['success'] ? 200 : 404;
-        return response()->json($result, $statusCode);
-    }
-    
-    // Other controller methods...
-}
-```
-
-In this implementation, the Adapters layer contains only framework-agnostic components (like presenters), while framework-specific components (controllers, resources) are properly placed in the IO layer. This maintains the clean architecture principle of keeping the inner layers independent of frameworks and external tools.
-
-### IO Layer
-
-Contains frameworks, drivers, and external services:
-- Controllers and HTTP resources
-- Database implementations
-- Web interfaces
-- External API integrations (REST, GraphQL)
-- Framework-specific code
-
-This is the outermost layer and can depend on all inner layers.
-
-## Service Providers
-
-Laravel Service Providers are organized according to their domain and purpose:
-
-```
-project-root/
-├── app/
-│   ├── Foundation/               
-│   │   ├── ...
-│   │   ├── IO/                   
-│   │       ├── FoundationServiceProvider.php  # Core app-wide service provider
-│   │       ├── Http/             
-│   │           ├── RouteServiceProvider.php    # Framework-level route provider
-│   │
-│   ├── Booking/                  
-│   │   ├── ...
-│   │   ├── IO/                   
-│   │       ├── BookingServiceProvider.php      # Booking domain service provider
-│   │       ├── ...
-│   │
-│   ├── Payment/                  
-│   │   ├── ...
-│   │   ├── IO/                   
-│   │       ├── PaymentServiceProvider.php      # Payment domain service provider
-│   │       ├── ...
-│   │
-│   └── User/                     
-│       ├── ...
-│       ├── IO/                   
-│           ├── UserServiceProvider.php         # User domain service provider
-│           ├── ...
-```
-
-Each domain's service provider is responsible for:
-- Registering repositories and interfaces
-- Loading domain-specific routes
-- Setting up event listeners
-- Registering domain-specific middleware
-
-The `FoundationServiceProvider` handles application-wide concerns and bootstraps shared components.
-
-These providers must then be registered in the `config/app.php` providers array.
-
-## Repository Pattern
-
-In Clean Architecture, the repository interfaces should be defined by the Use Cases layer, as they represent the "ports" through which the application core communicates with the outside world.
-
-**1. Repository Interface in Use Cases Layer:**
-
-```php
-// app/Booking/UseCases/Repositories/BookingRepositoryInterface.php
-namespace App\Booking\UseCases\Repositories;
-
-use App\Booking\Entities\Booking;
-
-interface BookingRepositoryInterface
-{
-    public function findById(string $id): ?Booking;
-    public function findActiveByDateRange(string $userId, \DateTime $startDate, \DateTime $endDate): array;
-    public function save(Booking $booking): Booking;
-    public function delete(string $id): bool;
-}
-```
-
-**2. Use Case Using Repository:**
-
-```php
-// app/Booking/UseCases/CreateBooking.php
-namespace App\Booking\UseCases;
-
-use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
-use App\Booking\Entities\Booking;
-use App\Booking\UseCases\CreateBooking\CreateBookingRequest;
-use App\Booking\UseCases\Exceptions\BookingConflictException;
 
 class CreateBooking
 {
@@ -433,18 +296,6 @@ class CreateBooking
     
     public function execute(CreateBookingRequest $request): Booking
     {
-        // Check for conflicts
-        $existingBookings = $this->bookingRepository->findActiveByDateRange(
-            $request->userId,
-            new \DateTime($request->startDate),
-            new \DateTime($request->endDate)
-        );
-        
-        if (count($existingBookings) > 0) {
-            throw new BookingConflictException('User already has a booking in this date range');
-        }
-        
-        // Create new booking
         $booking = new Booking();
         $booking->user_id = $request->userId;
         $booking->start_date = $request->startDate;
@@ -452,13 +303,16 @@ class CreateBooking
         $booking->notes = $request->notes;
         $booking->status = 'pending';
         
-        // Persist
         return $this->bookingRepository->save($booking);
     }
 }
 ```
 
-**3. Repository Implementation in IO Layer:**
+## Repository Pattern Implementation Choices
+
+When implementing repositories, you have two main approaches to choose from:
+
+### Direct Eloquent Access (Simpler)
 
 ```php
 // app/Booking/IO/Database/Repositories/EloquentBookingRepository.php
@@ -466,14 +320,43 @@ namespace App\Booking\IO\Database\Repositories;
 
 use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
 use App\Booking\Entities\Booking;
-use Illuminate\Support\Facades\DB;
-use DateTime;
 
 class EloquentBookingRepository implements BookingRepositoryInterface
 {
     public function findById(string $id): ?Booking
     {
-        // Use DB::table for consistent approach across repository methods
+        return Booking::find($id);
+    }
+    
+    public function save(Booking $booking): Booking
+    {
+        $booking->save();
+        return $booking;
+    }
+}
+```
+
+**Best for:**
+- Smaller applications with straightforward data access
+- When you need to leverage Eloquent relationships
+- When performance is not the primary concern
+- Teams more familiar with Eloquent than raw queries
+
+### Query Builder Approach (More Performant)
+
+```php
+// app/Booking/IO/Database/Repositories/QueryBookingRepository.php
+namespace App\Booking\IO\Database\Repositories;
+
+use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
+use App\Booking\Entities\Booking;
+use Illuminate\Support\Facades\DB;
+
+class QueryBookingRepository implements BookingRepositoryInterface
+{
+    public function findById(string $id): ?Booking
+    {
+        // Use DB::table for better performance
         $bookingData = DB::table('bookings')->where('id', $id)->first();
         
         if (!$bookingData) {
@@ -483,31 +366,36 @@ class EloquentBookingRepository implements BookingRepositoryInterface
         return $this->mapToEntity($bookingData);
     }
     
-    public function findActiveByDateRange(string $userId, DateTime $startDate, DateTime $endDate): array
+    public function save(Booking $booking): Booking
     {
-        // For complex queries, DB::table offers better performance
-        $bookingsData = DB::table('bookings')
-            ->where('user_id', $userId)
-            ->where('status', 'active')
-            ->where(function ($query) use ($startDate, $endDate) {
-                $query->whereBetween('start_date', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
-                    ->orWhereBetween('end_date', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
-                    ->orWhere(function ($query) use ($startDate, $endDate) {
-                        $query->where('start_date', '<=', $startDate->format('Y-m-d'))
-                              ->where('end_date', '>=', $endDate->format('Y-m-d'));
-                    });
-            })
-            ->get();
+        if (empty($booking->id)) {
+            // Insert new record
+            $id = DB::table('bookings')->insertGetId([
+                'user_id' => $booking->user_id,
+                'start_date' => $booking->start_date,
+                'end_date' => $booking->end_date,
+                'status' => $booking->status,
+                'notes' => $booking->notes,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
             
-        // Map DB results to domain entities
-        return $bookingsData->map(function ($bookingData) {
-            return $this->mapToEntity($bookingData);
-        })->all();
-    }
-    
-    public function delete(string $id): bool
-    {
-        return DB::table('bookings')->where('id', $id)->delete() > 0;
+            $booking->id = $id;
+        } else {
+            // Update existing record
+            DB::table('bookings')
+                ->where('id', $booking->id)
+                ->update([
+                    'user_id' => $booking->user_id,
+                    'start_date' => $booking->start_date,
+                    'end_date' => $booking->end_date,
+                    'status' => $booking->status,
+                    'notes' => $booking->notes,
+                    'updated_at' => now(),
+                ]);
+        }
+        
+        return $booking;
     }
     
     /**
@@ -531,7 +419,15 @@ class EloquentBookingRepository implements BookingRepositoryInterface
 }
 ```
 
-**4. Service Provider Registration:**
+**Best for:**
+- Applications with high performance requirements
+- Complex queries with many joins or conditions
+- When you need explicit control over the SQL being generated
+- Larger datasets where Eloquent's overhead becomes noticeable
+
+## Service Providers
+
+Each domain has its own service provider to register dependencies:
 
 ```php
 // app/Booking/IO/BookingServiceProvider.php
@@ -554,172 +450,310 @@ class BookingServiceProvider extends ServiceProvider
         // Register other bindings...
     }
     
-    // Other service provider methods...
+    public function boot()
+    {
+        // Load routes, views, etc.
+    }
 }
 ```
 
-In this implementation, the repository interface is defined by the Use Cases layer, which better aligns with Clean Architecture principles. The Use Cases specify what they need from the outside world, and the IO layer provides the implementation. This maintains the dependency rule: dependencies point inward, with the Use Cases defining the interfaces and the outer layers implementing them.
+## Consistent Error Handling Across Interfaces
 
-## Model Factories
-
-There are two approaches to organizing Model Factories:
-
-### Approach 1: Laravel Conventional Structure
-
-```
-project-root/
-├── database/
-│   └── factories/
-│       ├── Booking/                 # Booking domain factories
-│       │   └── BookingFactory.php
-│       ├── Payment/                 # Payment domain factories
-│       │   └── TransactionFactory.php
-│       └── User/                    # User domain factories
-│           └── UserFactory.php
-```
-
-This approach maintains Laravel's conventional structure while still organizing factories by domain. It preserves the dependency rule - entities don't need to know about factories, but factories can know about entities.
-
-Example implementation:
+When your application has multiple entry points (HTTP, CLI, etc.), handling exceptions consistently becomes challenging. The presenter pattern solves this problem:
 
 ```php
-// database/factories/Booking/BookingFactory.php
-
-namespace Database\Factories\Booking;
+// app/Booking/UseCases/CancelBooking/CancelBookingPresenterInterface.php
+namespace App\Booking\UseCases\CancelBooking;
 
 use App\Booking\Entities\Booking;
-use Illuminate\Database\Eloquent\Factories\Factory;
 
-class BookingFactory extends Factory
+interface CancelBookingPresenterInterface
 {
-    protected $model = Booking::class;
+    public function presentSuccess(Booking $booking): mixed;
+    public function presentNotFound(string $bookingId): mixed;
+    public function presentCannotCancel(string $reason): mixed;
+}
+
+// app/Booking/UseCases/CancelBooking.php
+namespace App\Booking\UseCases;
+
+use App\Booking\Entities\Booking;
+use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
+use App\Booking\UseCases\CancelBooking\CancelBookingPresenterInterface;
+
+class CancelBooking
+{
+    private $bookingRepository;
     
-    public function definition()
+    public function __construct(BookingRepositoryInterface $bookingRepository)
+    {
+        $this->bookingRepository = $bookingRepository;
+    }
+    
+    public function execute(string $bookingId, CancelBookingPresenterInterface $presenter)
+    {
+        $booking = $this->bookingRepository->findById($bookingId);
+        
+        if (!$booking) {
+            return $presenter->presentNotFound($bookingId);
+        }
+        
+        if (!$booking->canBeCancelled()) {
+            return $presenter->presentCannotCancel('Booking is not in an active state or has already started');
+        }
+        
+        $booking->cancel();
+        $booking = $this->bookingRepository->save($booking);
+        
+        return $presenter->presentSuccess($booking);
+    }
+}
+```
+
+Now you can implement different presenters for different interfaces:
+
+```php
+// app/Booking/Adapters/Presenters/CancelBookingJsonPresenter.php
+namespace App\Booking\Adapters\Presenters;
+
+use App\Booking\Entities\Booking;
+use App\Booking\UseCases\CancelBooking\CancelBookingPresenterInterface;
+
+class CancelBookingJsonPresenter implements CancelBookingPresenterInterface
+{
+    public function presentSuccess(Booking $booking): array
     {
         return [
-            'user_id' => \Database\Factories\User\UserFactory::new(),
-            'start_date' => $this->faker->dateTimeBetween('+1 week', '+2 weeks'),
-            'end_date' => $this->faker->dateTimeBetween('+3 weeks', '+4 weeks'),
-            'status' => $this->faker->randomElement(['pending', 'confirmed', 'cancelled']),
+            'success' => true,
+            'data' => [
+                'id' => $booking->id,
+                'status' => 'cancelled',
+                'cancelled_at' => $booking->cancelled_at->format('Y-m-d H:i:s'),
+            ]
         ];
     }
     
-    // Factory states
-    public function confirmed()
-    {
-        return $this->state(['status' => 'confirmed']);
-    }
-}
-```
-
-### Approach 2: Domain-Centric Model Factories
-
-An alternative approach is to place model factories directly within the domain structure:
-
-```
-project-root/
-├── app/
-│   ├── Booking/
-│   │   ├── Entities/
-│   │   │   ├── Models/             # Domain models
-│   │   │   │   ├── Booking.php
-│   │   │   │   └── Factories/      # Model factories
-│   │   │   │       └── BookingFactory.php
-```
-
-Example implementation:
-
-```php
-// app/Booking/Entities/Models/Factories/BookingFactory.php
-
-namespace App\Booking\Entities\Models\Factories;
-
-use App\Booking\Entities\Models\Booking;
-use Illuminate\Database\Eloquent\Factories\Factory;
-
-class BookingFactory extends Factory
-{
-    protected $model = Booking::class;
-    
-    public function definition()
+    public function presentNotFound(string $bookingId): array
     {
         return [
-            'user_id' => \App\User\Entities\Models\Factories\UserFactory::new(),
-            'start_date' => $this->faker->dateTimeBetween('+1 week', '+2 weeks'),
-            'end_date' => $this->faker->dateTimeBetween('+3 weeks', '+4 weeks'),
-            'status' => $this->faker->randomElement(['pending', 'confirmed', 'cancelled']),
+            'success' => false,
+            'error' => [
+                'code' => 'booking_not_found',
+                'message' => "Booking {$bookingId} not found"
+            ]
+        ];
+    }
+    
+    public function presentCannotCancel(string $reason): array
+    {
+        return [
+            'success' => false,
+            'error' => [
+                'code' => 'booking_cannot_cancel',
+                'message' => $reason
+            ]
         ];
     }
 }
-```
 
-And in the model:
+// app/Booking/Adapters/Presenters/CancelBookingCliPresenter.php
+namespace App\Booking\Adapters\Presenters;
 
-```php
-// app/Booking/Entities/Models/Booking.php
+use App\Booking\Entities\Booking;
+use App\Booking\UseCases\CancelBooking\CancelBookingPresenterInterface;
 
-namespace App\Booking\Entities\Models;
-
-use App\Booking\Entities\Models\Factories\BookingFactory;
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
-
-class Booking extends Model
+class CancelBookingCliPresenter implements CancelBookingPresenterInterface
 {
-    use HasFactory;
-    
-    // Factory connection
-    protected static function newFactory()
+    public function presentSuccess(Booking $booking): string
     {
-        return BookingFactory::new();
+        return "✓ Booking {$booking->id} has been successfully cancelled.";
     }
     
-    // Domain methods...
+    public function presentNotFound(string $bookingId): string
+    {
+        return "✗ Error: Booking {$bookingId} not found.";
+    }
+    
+    public function presentCannotCancel(string $reason): string
+    {
+        return "✗ Error: Cannot cancel booking. {$reason}";
+    }
 }
 ```
 
-This approach creates tighter integration between models and factories but introduces a bidirectional dependency.
+These are used in the appropriate controllers/commands:
 
-## GraphQL Components
+```php
+// app/Booking/IO/Http/BookingController.php
+namespace App\Booking\IO\Http;
 
-GraphQL components (using Lighthouse or other GraphQL implementations) are placed in the IO layer of each domain:
+use App\Booking\Adapters\Presenters\CancelBookingJsonPresenter;
+use App\Booking\UseCases\CancelBooking;
+use Illuminate\Http\JsonResponse;
 
+class BookingController
+{
+    private $cancelBooking;
+    
+    public function __construct(CancelBooking $cancelBooking)
+    {
+        $this->cancelBooking = $cancelBooking;
+    }
+    
+    public function cancel(string $id): JsonResponse
+    {
+        $presenter = new CancelBookingJsonPresenter();
+        $result = $this->cancelBooking->execute($id, $presenter);
+        
+        $statusCode = isset($result['success']) && $result['success'] ? 200 : 
+            (isset($result['error']['code']) && $result['error']['code'] === 'booking_not_found' ? 404 : 400);
+            
+        return response()->json($result, $statusCode);
+    }
+}
+
+// app/Booking/IO/Console/CancelBookingCommand.php
+namespace App\Booking\IO\Console;
+
+use App\Booking\Adapters\Presenters\CancelBookingCliPresenter;
+use App\Booking\UseCases\CancelBooking;
+use Illuminate\Console\Command;
+
+class CancelBookingCommand extends Command
+{
+    protected $signature = 'booking:cancel {id}';
+    protected $description = 'Cancel a booking';
+    
+    private $cancelBooking;
+    
+    public function __construct(CancelBooking $cancelBooking)
+    {
+        parent::__construct();
+        $this->cancelBooking = $cancelBooking;
+    }
+    
+    public function handle()
+    {
+        $bookingId = $this->argument('id');
+        $presenter = new CancelBookingCliPresenter();
+        
+        $result = $this->cancelBooking->execute($bookingId, $presenter);
+        
+        $this->line($result);
+        
+        return str_contains($result, '✓') ? 0 : 1; // Success or error exit code
+    }
+}
 ```
-project-root/
-├── app/
-│   ├── Foundation/
-│   │   ├── IO/
-│   │   │   ├── GraphQL/          # Shared GraphQL components
-│   │   │   │   ├── Directives/   # Custom directives
-│   │   │   │   ├── Scalars/      # Custom scalar types
-│   │   │   │   └── Interfaces/   # Shared interfaces
-│   │
-│   ├── Booking/
-│   │   ├── IO/
-│   │   │   ├── GraphQL/          # GraphQL components for Booking domain
-│   │   │   │   ├── Queries/      # Query resolvers
-│   │   │   │   ├── Mutations/    # Mutation resolvers
-│   │   │   │   ├── Types/        # Object type definitions
-│   │   │   │   └── Unions/       # Union type definitions
-│   │
-│   ├── Payment/
-│   │   ├── IO/
-│   │   │   ├── GraphQL/          # GraphQL components for Payment domain
-│   │   │   │   ├── Queries/
-│   │   │   │   ├── Mutations/
-│   │   │   │   ├── Types/
-│   │   │   │   └── Unions/
-│   │
-│   └── User/
-│       ├── IO/
-│       │   ├── GraphQL/          # GraphQL components for User domain
-│       │   │   ├── Queries/
-│       │   │   ├── Mutations/
-│       │   │   ├── Types/
-│       │   │   └── Unions/
+
+This approach ensures consistent handling of all outcomes across different interfaces while keeping the use case interface-agnostic.
+
+## Testing Support
+
+Each domain includes testing utilities:
+
+```php
+// app/Booking/Testing/BookingRepositoryMock.php
+namespace App\Booking\Testing;
+
+use App\Booking\Entities\Booking;
+use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
+
+class BookingRepositoryMock implements BookingRepositoryInterface
+{
+    private array $bookings = [];
+    private ?Booking $lastSavedBooking = null;
+    
+    public function findById(string $id): ?Booking
+    {
+        foreach ($this->bookings as $booking) {
+            if ($booking->id == $id) {
+                return $booking;
+            }
+        }
+        
+        return null;
+    }
+    
+    public function save(Booking $booking): Booking
+    {
+        // Simulate auto-increment ID if not set
+        if (empty($booking->id)) {
+            $booking->id = count($this->bookings) + 1;
+        }
+        
+        // Store the booking
+        $this->lastSavedBooking = $booking;
+        $this->bookings[] = $booking;
+        
+        return $booking;
+    }
+    
+    // Helper methods for tests
+    public function addBooking(Booking $booking): self
+    {
+        $this->bookings[] = $booking;
+        return $this;
+    }
+    
+    public function getLastSavedBooking(): ?Booking
+    {
+        return $this->lastSavedBooking;
+    }
+}
 ```
 
-### Example Implementation
+## Advanced Testing Tools
+
+For more complex testing scenarios:
+
+```php
+// app/Booking/Testing/BookingTestAssertions.php
+namespace App\Booking\Testing;
+
+use App\Booking\Entities\Booking;
+use PHPUnit\Framework\Assert;
+
+class BookingTestAssertions
+{
+    /**
+     * Assert that a booking has expected basic properties
+     */
+    public static function assertBookingHasProperties(
+        Booking $booking, 
+        string $userId, 
+        string $startDate, 
+        string $endDate, 
+        string $status,
+        ?string $notes = null
+    ): void {
+        Assert::assertEquals($userId, $booking->user_id, 'Booking has incorrect user ID');
+        Assert::assertEquals($startDate, $booking->start_date, 'Booking has incorrect start date');
+        Assert::assertEquals($endDate, $booking->end_date, 'Booking has incorrect end date');
+        Assert::assertEquals($status, $booking->status, 'Booking has incorrect status');
+        
+        if ($notes !== null) {
+            Assert::assertEquals($notes, $booking->notes, 'Booking has incorrect notes');
+        }
+    }
+
+    /**
+     * Assert that a booking was saved in the repository
+     */
+    public static function assertBookingWasSaved(
+        BookingRepositoryMock $repository, 
+        Booking $expectedBooking
+    ): void {
+        $savedBooking = $repository->getLastSavedBooking();
+        Assert::assertNotNull($savedBooking, 'No booking was saved to the repository');
+        Assert::assertSame($expectedBooking, $savedBooking, 'Different booking was saved than expected');
+    }
+}
+```
+
+## Advanced Integration: GraphQL Components
+
+For applications using GraphQL:
 
 ```php
 // app/Booking/IO/GraphQL/Mutations/CreateBookingMutation.php
@@ -758,186 +792,38 @@ class CreateBookingMutation
 }
 ```
 
-This placement is appropriate because GraphQL components are part of your application's external interface layer, similar to REST controllers. They handle the translation between your domain's internal structures and the GraphQL schema that's exposed to clients.
+## Model Factories (Advanced)
 
-In your Lighthouse schema, you would reference these classes:
-
-```graphql
-type Mutation {
-    createBooking(input: CreateBookingInput!): Booking! @field(resolver: "App\\Booking\\IO\\GraphQL\\Mutations\\CreateBookingMutation")
-}
-```
-
-The GraphQL namespace in the IO layer of each domain maintains clean architecture principles while properly categorizing GraphQL as an IO concern.
-
-## Example Implementation
-
-Here's an example of how models would fit in the Entities layer:
+For test data generation:
 
 ```php
-// app/Booking/Entities/Booking.php
-namespace App\Booking\Entities;
-
-use Illuminate\Database\Eloquent\Model;
-use App\User\Entities\User;
-
-class Booking extends Model
-{
-    protected $fillable = ['user_id', 'start_date', 'end_date', 'status'];
-    
-    // Domain methods (business logic)
-    public function cancel()
-    {
-        $this->status = 'cancelled';
-        $this->cancelled_at = now();
-        return $this;
-    }
-    
-    public function canBeCancelled()
-    {
-        return $this->status === 'active' && $this->start_date > now();
-    }
-    
-    // Relationships
-    public function user()
-    {
-        return $this->belongsTo(User::class);
-    }
-}
-
-// app/Booking/UseCases/CancelBooking.php
-namespace App\Booking\UseCases;
+// database/factories/Booking/BookingFactory.php
+namespace Database\Factories\Booking;
 
 use App\Booking\Entities\Booking;
+use Illuminate\Database\Eloquent\Factories\Factory;
 
-class CancelBooking
+class BookingFactory extends Factory
 {
-    public function execute(string $bookingId)
+    protected $model = Booking::class;
+    
+    public function definition()
     {
-        $booking = Booking::findOrFail($bookingId);
-        
-        if (!$booking->canBeCancelled()) {
-            throw new BookingCancellationException('Booking cannot be cancelled');
-        }
-        
-        $booking->cancel();
-        $booking->save();
-        
-        return $booking;
+        return [
+            'user_id' => \Database\Factories\User\UserFactory::new(),
+            'start_date' => $this->faker->dateTimeBetween('+1 week', '+2 weeks'),
+            'end_date' => $this->faker->dateTimeBetween('+3 weeks', '+4 weeks'),
+            'status' => $this->faker->randomElement(['pending', 'confirmed', 'cancelled']),
+        ];
+    }
+    
+    // Factory states
+    public function confirmed()
+    {
+        return $this->state(['status' => 'confirmed']);
     }
 }
 ```
-
-## Specifications
-
-Each domain includes a `Specs` directory containing behavior specifications for that domain. Specs serve as both tests and living documentation, describing the expected behavior of components.
-
-## Testing Support
-
-Each domain includes a `Testing` directory that provides utilities to support testing:
-- Mock implementations
-- Testing helpers
-- Fixtures and datasets
-
-### Example Testing API Implementation
-
-**1. Repository Mock (Basic Example)**
-
-```php
-// app/Booking/Testing/BookingRepositoryMock.php
-namespace App\Booking\Testing;
-
-use App\Booking\Entities\Booking;
-use App\Booking\UseCases\Repositories\BookingRepositoryInterface;
-use DateTime;
-
-class BookingRepositoryMock implements BookingRepositoryInterface
-{
-    private array $bookings = [];
-    
-    public function findById(string $id): ?Booking
-    {
-        foreach ($this->bookings as $booking) {
-            if ($booking->id == $id) {
-                return $booking;
-            }
-        }
-        return null;
-    }
-    
-    // Helper method for tests
-    public function addBooking(Booking $booking): self
-    {
-        $this->bookings[] = $booking;
-        return $this;
-    }
-    
-    // Implement other required methods...
-}
-```
-
-**Example: Testing a Use Case**
-
-```php
-// app/Booking/Specs/CreateBookingSpec.php
-namespace App\Booking\Specs;
-
-use App\Booking\Entities\Booking;
-use App\Booking\Testing\BookingRepositoryMock;
-use App\Booking\UseCases\CreateBooking;
-use App\Booking\UseCases\CreateBooking\CreateBookingRequest;
-use Tests\TestCase;
-
-class CreateBookingSpec extends TestCase
-{
-    private BookingRepositoryMock $repositoryMock;
-
-    protected function setUp(): void
-    {
-        parent::setUp();
-        $this->repositoryMock = new BookingRepositoryMock();
-    }
-
-    /** @test */
-    public function it_creates_a_new_booking()
-    {
-        // Arrange
-        $useCase = new CreateBooking($this->repositoryMock);
-
-        // Create a request DTO
-        $request = new CreateBookingRequest();
-        $request->userId = '456';
-        $request->startDate = '2025-05-01';
-        $request->endDate = '2025-05-03';
-        $request->notes = 'Business trip';
-
-        // Act
-        $result = $useCase->execute($request);
-
-        // Assert
-        $this->assertBookingCreated($result, $request);
-    }
-
-    private function assertBookingCreated(Booking $booking, CreateBookingRequest $request): void
-    {
-        $this->assertInstanceOf(Booking::class, $booking);
-        $this->assertEquals($request->userId, $booking->user_id);
-        $this->assertEquals($request->startDate, $booking->start_date);
-        $this->assertEquals($request->endDate, $booking->end_date);
-        $this->assertEquals($request->notes, $booking->notes);
-        $this->assertEquals('pending', $booking->status);
-    }
-}
-```
-
-This example demonstrates how to test a CreateBooking use case by:
-1. Creating a mock repository that captures the booking being saved
-2. Setting up a request DTO with test data
-3. Executing the use case
-4. Verifying that the booking was created with the correct attributes
-5. Confirming that the repository's save method was called with the right data
-
-The test focuses on the behavior of the use case rather than the implementation details, ensuring that it correctly transforms the input data and interacts with the repository as expected.
 
 ## Benefits
 
